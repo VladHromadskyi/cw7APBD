@@ -121,4 +121,76 @@ public class AppointmentsController : ControllerBase
         var newId = await insertCmd.ExecuteScalarAsync();
         return CreatedAtAction(nameof(GetAppointment), new { id = Convert.ToInt32(newId) }, null);
     }
+    [HttpPut("{idAppointment:int}")]
+    public async Task<IActionResult> UpdateAppointment(int idAppointment, [FromBody] UpdateAppointmentRequestDto request)
+    {
+        var connectionString = _configuration.GetConnectionString("DefaultConnection");
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        
+        string getExistingSql = "SELECT Status, AppointmentDate FROM Appointments WHERE IdAppointment = @Id";
+        await using var getCmd = new SqlCommand(getExistingSql, connection);
+        getCmd.Parameters.AddWithValue("@Id", idAppointment);
+        await using var reader = await getCmd.ExecuteReaderAsync();
+        
+        if (!await reader.ReadAsync()) return NotFound("Appointment not found.");
+
+        string currentStatus = reader.GetString(0);
+        DateTime currentDate = reader.GetDateTime(1);
+        await reader.CloseAsync();
+
+        
+        var allowedStatuses = new[] { "Scheduled", "Completed", "Cancelled" };
+        if (!allowedStatuses.Contains(request.Status))
+            return BadRequest("Invalid status.");
+        
+        if (currentStatus == "Completed" && request.AppointmentDate != currentDate)
+            return BadRequest("Cannot change date for a completed appointment.");
+
+        
+        string checkSql = @"
+            SELECT (SELECT COUNT(*) FROM Patients WHERE IdPatient = @IdP AND IsActive = 1),
+                   (SELECT COUNT(*) FROM Doctors WHERE IdDoctor = @IdD AND IsActive = 1)";
+        await using var checkCmd = new SqlCommand(checkSql, connection);
+        checkCmd.Parameters.AddWithValue("@IdP", request.IdPatient);
+        checkCmd.Parameters.AddWithValue("@IdD", request.IdDoctor);
+        await using var checkReader = await checkCmd.ExecuteReaderAsync();
+        await checkReader.ReadAsync();
+        if (checkReader.GetInt32(0) == 0 || checkReader.GetInt32(1) == 0)
+            return BadRequest("Patient or Doctor not found/inactive.");
+        await checkReader.CloseAsync();
+
+        
+        if (request.AppointmentDate != currentDate)
+        {
+            string conflictSql = "SELECT COUNT(*) FROM Appointments WHERE IdDoctor = @IdD AND AppointmentDate = @Date AND IdAppointment != @Id";
+            await using var conflictCmd = new SqlCommand(conflictSql, connection);
+            conflictCmd.Parameters.AddWithValue("@IdD", request.IdDoctor);
+            conflictCmd.Parameters.AddWithValue("@Date", request.AppointmentDate);
+            conflictCmd.Parameters.AddWithValue("@Id", idAppointment);
+            if ((int)await conflictCmd.ExecuteScalarAsync() > 0)
+                return Conflict("Doctor is busy at this time.");
+        }
+
+        
+        string updateSql = @"
+            UPDATE Appointments 
+            SET IdPatient = @IdP, IdDoctor = @IdD, AppointmentDate = @Date, 
+                Status = @Status, Reason = @Reason, InternalNotes = @Notes
+            WHERE IdAppointment = @Id";
+        
+        await using var updateCmd = new SqlCommand(updateSql, connection);
+        updateCmd.Parameters.AddWithValue("@IdP", request.IdPatient);
+        updateCmd.Parameters.AddWithValue("@IdD", request.IdDoctor);
+        updateCmd.Parameters.AddWithValue("@Date", request.AppointmentDate);
+        updateCmd.Parameters.AddWithValue("@Status", request.Status);
+        updateCmd.Parameters.AddWithValue("@Reason", request.Reason);
+        updateCmd.Parameters.AddWithValue("@Notes", (object?)request.InternalNotes ?? DBNull.Value);
+        updateCmd.Parameters.AddWithValue("@Id", idAppointment);
+
+        await updateCmd.ExecuteNonQueryAsync();
+        return NoContent();
+    }
 }
+
